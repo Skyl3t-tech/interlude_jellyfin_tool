@@ -4,9 +4,9 @@ A Windows app that shows where you are in every show on your Jellyfin server.
 
 ## Install and update
 
-Releases are built by GitHub Actions (`.github/workflows/release.yml`) whenever a tag like `v0.3.0` is pushed. Download the file ending in `-setup.exe` from the latest release and run it. It installs for your Windows account only, with no admin prompt. Installed copies check for updates every 6 hours and show a "Restart to update" banner.
+Releases are built by GitHub Actions (`.github/workflows/release.yml`) when the version in `src-tauri/tauri.conf.json` changes on `main`, or when you run the workflow from the Actions tab. Download the file ending in `-setup.exe` from the latest release and run it. It installs for your Windows account only, with no admin prompt. Installed copies check for updates every 6 hours and show a "Restart to update" banner.
 
-To publish a new version: set the same version in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, commit, and push a tag `v<version>`.
+To publish a new version: set the same version in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, commit and push to `main`. The workflow tags the release `v<version>`.
 
 The repository needs two Actions secrets (Settings > Secrets and variables > Actions):
 

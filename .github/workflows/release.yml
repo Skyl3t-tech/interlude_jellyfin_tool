@@ -1,10 +1,14 @@
-# Builds the Windows installer and publishes a GitHub release whenever a tag like v0.3.0 is pushed.
+# Builds the Windows installer and publishes a GitHub release (tag v<version>) when the
+# version in tauri.conf.json changes on main, or when run by hand from the Actions tab.
 # Installed copies of Interlude check this repository's latest release and update themselves.
 name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths:
+      - src-tauri/tauri.conf.json
+      - .github/workflows/release.yml
   workflow_dispatch:
 
 permissions:
