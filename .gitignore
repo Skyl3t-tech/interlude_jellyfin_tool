@@ -1,0 +1,5 @@
+target/
+gen/
+*.exe
+node_modules/
+src-tauri/tauri.release.conf.json

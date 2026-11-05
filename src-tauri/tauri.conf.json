@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Interlude",
+  "version": "0.2.0",
+  "identifier": "app.interlude.tracker",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Interlude",
+        "width": 1120,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 520,
+        "backgroundColor": "#14173A",
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' jfimg: http://jfimg.localhost; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "createUpdaterArtifacts": false,
+    "publisher": "Interlude",
+    "shortDescription": "Tracks the shows you are watching on Jellyfin",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFFNTBDOTdEQzNGODMwRDgKUldUWU1QakRmY2xRcnFmTWZVZkx2bzVEVWhCaW44cHdSL0tYY1pyUW53bCtKOHlWcTh2elZFaWwK",
+      "endpoints": [],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

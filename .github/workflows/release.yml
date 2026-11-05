@@ -1,0 +1,49 @@
+# Builds the Windows installer and publishes a GitHub release whenever a tag like v0.3.0 is pushed.
+# Installed copies of Interlude check this repository's latest release and update themselves.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Point the updater at this repository's releases
+        shell: bash
+        run: |
+          cat > src-tauri/tauri.release.conf.json <<EOF
+          {
+            "bundle": { "createUpdaterArtifacts": true },
+            "plugins": {
+              "updater": {
+                "endpoints": ["https://github.com/${{ github.repository }}/releases/latest/download/latest.json"]
+              }
+            }
+          }
+          EOF
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Interlude v__VERSION__
+          releaseBody: Download the file ending in -setup.exe to install. Installed copies update themselves.
+          releaseDraft: false
+          args: --config src-tauri/tauri.release.conf.json
