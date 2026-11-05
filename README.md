@@ -20,12 +20,14 @@ Updates are checked against the public key in `tauri.conf.json`, so only release
 ## Views
 
 - Watching: shows in progress. Watching now means you watched an episode in the last 30 days; older ones are On hold. Caught up lists fully watched shows that are still airing. "New" marks episodes added to Jellyfin since you last watched the show.
-- Upcoming: the next episodes, with exact times in your time zone from TVmaze when it knows the show, otherwise TMDB's air date.
+- Upcoming: the next episodes, with exact times in your time zone: AniList for anime, TVmaze for other shows, otherwise TMDB's air date.
 - Missing: aired episodes that aren't in Jellyfin. An episode with an exact time gets a day to reach your server before it counts. Shows that Jellyfin numbers differently from TMDB (common with anime) are listed under Couldn't check. Episodes from before the first one on your server are ignored automatically (a setting), and Ignore hides the rest of a show's current gaps.
 
 ## Data
 
-Watch progress comes only from Jellyfin, which pushes changes over its WebSocket as they happen. Air dates and episode lists come from TMDB, and air times from TVmaze, cached for 6 hours. Your Jellyfin token and TMDB key are stored in Windows Credential Manager; ignored episodes in `ignored.json` in the app's settings folder.
+Watch progress comes only from Jellyfin, which pushes changes over its WebSocket as they happen. Air dates and episode lists come from TMDB, and air times from TVmaze, cached for 6 hours.
+
+Anime with an AniList ID in Jellyfin (set by the AniList metadata plugin, on the show or on each season) uses AniList instead: its episode counts per season or cour match how anime plugins number episodes, and it has exact broadcast times. AniList needs no account and is cached for an hour. A show with several seasons but only a show-level AniList ID falls back to TMDB, since it can't tell which season the ID belongs to. Your Jellyfin token and TMDB key are stored in Windows Credential Manager; ignored episodes in `ignored.json` in the app's settings folder.
 
 ## Test
 

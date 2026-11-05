@@ -132,9 +132,35 @@ export async function loadShows(get, userId, now = Date.now()) {
 
   const shows = await inBatches([...series], 4, async ([id, entry]) => {
     const episodes = await get(`/Shows/${id}/Episodes`, [...user, ["isMissing", "false"], ["fields", "DateCreated"]]);
-    return buildShow(id, entry.title, entry.next, entry.resume, episodes.Items ?? [], entry.info ?? {}, now);
+    const show = buildShow(id, entry.title, entry.next, entry.resume, episodes.Items ?? [], entry.info ?? {}, now);
+    if (anilistId(entry.info?.ProviderIds)) {
+      const seasons = await get(`/Shows/${id}/Seasons`, [...user, ["fields", "ProviderIds"]]);
+      show.anilist = anilistSeasons(entry.info.ProviderIds, seasons.Items ?? []);
+    }
+    return show;
   });
   return shows.sort((a, b) => b.lastWatched - a.lastWatched);
+}
+
+/** The AniList ID a metadata plugin stored on an item, whatever the key's capitalisation. */
+export function anilistId(providerIds) {
+  const entry = Object.entries(providerIds ?? {}).find(([key]) => key.toLowerCase() === "anilist");
+  return Number(entry?.[1]) || null;
+}
+
+/**
+ * Which AniList entry each Jellyfin season matches: season-level IDs when the plugin set them,
+ * otherwise the show's ID for a show with a single season. Null when it can't tell.
+ */
+export function anilistSeasons(seriesIds, seasonItems) {
+  const regular = seasonItems.filter((s) => (s.IndexNumber ?? 0) > 0);
+  const mapping = {};
+  for (const season of regular) {
+    const id = anilistId(season.ProviderIds);
+    if (id) mapping[season.IndexNumber] = id;
+  }
+  if (!Object.keys(mapping).length && regular.length === 1) mapping[regular[0].IndexNumber] = anilistId(seriesIds);
+  return Object.keys(mapping).length ? mapping : null;
 }
 
 const AIRING = new Set(["Returning Series", "In Production", "Planned", "Pilot"]);
@@ -178,29 +204,89 @@ export function compareWithTmdb(show, tmdb, { now = Date.now(), ignored = new Se
   const gaps = numberingDiffers
     ? []
     : listed.filter((ep) => settled(ep, now, today) && !inJellyfin.has(episodeKey(ep))).sort(byEpisode);
-  const first = [...show.counted].sort(byEpisode)[0];
-  const isEarlier = (ep) => ignoreEarlier && first && byEpisode(ep, first) < 0;
-  const ignoredEarlier = gaps.filter(isEarlier);
-  const ignoredByHand = gaps.filter((ep) => !isEarlier(ep) && ignored.has(episodeKey(ep)));
-  const missing = gaps.filter((ep) => !isEarlier(ep) && !ignored.has(episodeKey(ep)));
+  const split = splitGaps(show, gaps, ignored, ignoreEarlier);
 
   let upcoming = listed.filter((ep) => (ep.airstamp || ep.airDate) && !settled(ep, now, today) && !inJellyfin.has(episodeKey(ep)));
   const next = tmdb.next;
   if (next && (next.airstamp || next.airDate) && !settled(next, now, today) && !upcoming.some((ep) => episodeKey(ep) === episodeKey(next))) {
     upcoming.push(next);
   }
-  upcoming = upcoming
-    .sort((a, b) => airDay(a).localeCompare(airDay(b)) || (a.airstamp ?? "").localeCompare(b.airstamp ?? "") || byEpisode(a, b))
-    .slice(0, UPCOMING_PER_SHOW);
-
   return {
+    source: "TMDB",
     airing: AIRING.has(tmdb.status),
     status: tmdb.status ?? "Unknown",
-    upcoming,
-    missing,
-    ignoredEarlier,
-    ignoredByHand,
+    upcoming: soonest(upcoming),
+    ...split,
     numberingDiffers,
+  };
+}
+
+const soonest = (eps) => eps
+  .sort((a, b) => airDay(a).localeCompare(airDay(b)) || (a.airstamp ?? "").localeCompare(b.airstamp ?? "") || byEpisode(a, b))
+  .slice(0, UPCOMING_PER_SHOW);
+
+/** Missing episodes, minus those ignored automatically (before the first one on the server) or by hand. */
+function splitGaps(show, gaps, ignored, ignoreEarlier) {
+  const first = [...show.counted].sort(byEpisode)[0];
+  const isEarlier = (ep) => ignoreEarlier && first && byEpisode(ep, first) < 0;
+  return {
+    ignoredEarlier: gaps.filter(isEarlier),
+    ignoredByHand: gaps.filter((ep) => !isEarlier(ep) && ignored.has(episodeKey(ep))),
+    missing: gaps.filter((ep) => !isEarlier(ep) && !ignored.has(episodeKey(ep))),
+  };
+}
+
+const ANILIST_AIRING = new Set(["RELEASING", "NOT_YET_RELEASED", "HIATUS"]);
+
+/**
+ * The same comparison for anime, from AniList: episodes 1 to N of each matched season have
+ * aired, where N comes from the next airing episode (or the total once finished). Exact
+ * broadcast times come from AniList's schedule. `data` is { media, schedule } from Rust.
+ */
+export function compareWithAniList(show, data, { now = Date.now(), ignored = new Set(), ignoreEarlier = true } = {}) {
+  const media = new Map((data.media ?? []).map((m) => [m.id, m]));
+  const gaps = [];
+  const upcoming = [];
+  const schedule = [];
+  let numberingDiffers = false;
+  let airing = false;
+  for (const [seasonText, id] of Object.entries(show.anilist ?? {})) {
+    const season = Number(seasonText);
+    const entry = media.get(id);
+    if (!entry) return null;
+    const next = entry.nextAiringEpisode;
+    const aired = ["FINISHED", "CANCELLED"].includes(entry.status)
+      ? entry.episodes ?? 0
+      : next ? next.episode - 1 : entry.status === "NOT_YET_RELEASED" ? 0 : entry.episodes ?? 0;
+    const known = Math.max(entry.episodes ?? 0, next?.episode ?? 0, aired);
+    const have = new Set(show.counted.filter((ep) => ep.season === season).map((ep) => ep.number));
+    if (known && [...have].some((n) => n > known)) numberingDiffers = true;
+    if (ANILIST_AIRING.has(entry.status)) airing = true;
+
+    const times = new Map();
+    for (const slot of (data.schedule ?? []).filter((s) => s.mediaId === id)) times.set(slot.episode, slot.airingAt * 1000);
+    if (next) times.set(next.episode, next.airingAt * 1000);
+    const at = (n) => (times.has(n) ? new Date(times.get(n)).toISOString() : null);
+
+    for (let n = 1; n <= aired; n++) {
+      const stamp = times.get(n);
+      if (stamp && stamp + MISSING_AFTER_MS > now) continue; // Just aired: still has time to arrive.
+      if (!have.has(n)) gaps.push({ season, number: n, name: null, airstamp: at(n), airDate: null });
+    }
+    for (const [n, stamp] of times) {
+      const ep = { season, number: n, name: null, airstamp: at(n), airDate: dayString(new Date(stamp)) };
+      schedule.push(ep);
+      if (stamp + MISSING_AFTER_MS > now && !have.has(n)) upcoming.push(ep);
+    }
+  }
+  return {
+    source: "AniList",
+    airing,
+    status: airing ? "Airing" : "Ended",
+    upcoming: soonest(upcoming),
+    ...(numberingDiffers ? { missing: [], ignoredEarlier: [], ignoredByHand: [] } : splitGaps(show, gaps.sort(byEpisode), ignored, ignoreEarlier)),
+    numberingDiffers,
+    schedule,
   };
 }
 

@@ -3,7 +3,7 @@
 // Run: node tests/mock-jellyfin.mjs   (Jellyfin user demo / demo, TMDB key "good-key")
 // Start a debug build with:
 //   INTERLUDE_TMDB_URL=http://localhost:8096/3 INTERLUDE_TVMAZE_URL=http://localhost:8096/tvmaze
-//   INTERLUDE_UPDATE_URL=http://localhost:8096/update/latest.json
+//   INTERLUDE_UPDATE_URL=http://localhost:8096/update/latest.json INTERLUDE_ANILIST_URL=http://localhost:8096/anilist
 // POST /mock/add-episode adds an episode to the first show and tells live clients.
 import http from "node:http";
 import crypto from "node:crypto";
@@ -25,7 +25,7 @@ const hex = (n) => n.toString(16).padStart(32, "0");
 const seq = (season, count, startOffset, step = 7) =>
   Array.from({ length: count }, (_, i) => [season, i + 1, startOffset + i * step]);
 const shows = [
-  { id: hex(1), name: "Sōsō no Frieren", tmdbId: 209867, status: "Continuing", jf: [28, 10], watched: 33, days: 1, resume: 34,
+  { id: hex(1), name: "Sōsō no Frieren", tmdbId: 209867, anilist: { series: 154587, seasons: { 1: 154587, 2: 182255 } }, status: "Continuing", jf: [28, 10], watched: 33, days: 1, resume: 34,
     addedRecently: 2, tmdbStatus: "Returning Series", tmdb: [...seq(1, 28, -700), ...seq(2, 12, -68)] },
   { id: hex(2), name: "Severance", tmdbId: 95396, status: "Continuing", jf: [9, 8], watched: 12, days: 4,
     tmdbStatus: "Returning Series", tmdb: [...seq(1, 9, -1000), ...seq(2, 10, -300)] },
@@ -36,6 +36,9 @@ const shows = [
   { id: hex(5), name: "Mushishi", tmdbId: null, status: "Ended", jf: [26], watched: 5, days: 210 },
   { id: hex(6), name: "Dandadan", tmdbId: 240411, airsSoon: true, status: "Continuing", jf: [12], watched: 12, days: 40,
     tmdbStatus: "Returning Series", tmdb: [...seq(1, 12, -400), ...seq(2, 12, 0)] },
+  // Anime with no TMDB ID: only AniList can check it. Season 2 is missing episodes 7 and 8.
+  { id: hex(8), name: "The Apothecary Diaries", tmdbId: null, anilist: { series: 161645, seasons: { 1: 161645, 2: 177709 } },
+    status: "Continuing", jf: [24, 6], watched: 28, days: 6 },
   { id: hex(7), name: "Pluribus", tmdbId: 225171, status: "Continuing", jf: [9], watched: 9, days: 20,
     tmdbStatus: "Ended", tmdb: seq(1, 9, -60) },
 ];
@@ -75,7 +78,7 @@ const nextUp = () => [...episodes.values()].flatMap((list) => {
 const resume = () => [...episodes.values()].flat().filter((e) => e.UserData.PlaybackPositionTicks > 0);
 const seriesItem = (show) => ({
   Id: show.id, Name: show.name, Type: "Series", Status: show.status,
-  ProviderIds: show.tmdbId ? { Tmdb: String(show.tmdbId) } : {},
+  ProviderIds: { ...(show.tmdbId ? { Tmdb: String(show.tmdbId) } : {}), ...(show.anilist ? { AniList: String(show.anilist.series) } : {}) },
   UserData: { Played: episodes.get(show.id).every((e) => e.UserData.Played) },
 });
 
@@ -95,6 +98,45 @@ function tvmaze(url, res, send) {
     if (show.airsSoon && offset === 0) stamp = new Date(startedAt + 70_000).toISOString();
     return { season, number, name: `TVmaze ${season}x${number}`, airdate: date, airstamp: stamp };
   }));
+}
+
+// AniList: Frieren season 2 airs weekly with episode 11 next; Apothecary Diaries season 2
+// has aired 8 of 24 (Jellyfin has 6), episode 9 airs in 4 days.
+const H = 3600;
+const nowSec = Math.floor(Date.now() / 1000);
+const anilistMedia = {
+  154587: { status: "FINISHED", episodes: 28, schedule: [] },
+  182255: { status: "RELEASING", episodes: 12, next: 11, nextAt: nowSec + 2 * 24 * H },
+  161645: { status: "FINISHED", episodes: 24, schedule: [] },
+  177709: { status: "RELEASING", episodes: 24, next: 9, nextAt: nowSec + 4 * 24 * H },
+};
+function anilist(req, send) {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    const { query, variables } = JSON.parse(body);
+    if (!query.includes("airingSchedules")) return send(400, { errors: [{ message: "bad query" }] });
+    const ids = variables.ids;
+    const media = ids.filter((id) => anilistMedia[id]).map((id) => {
+      const m = anilistMedia[id];
+      return { id, status: m.status, episodes: m.episodes, nextAiringEpisode: m.next ? { episode: m.next, airingAt: m.nextAt } : null };
+    });
+    const schedule = [];
+    for (const id of ids) {
+      const m = anilistMedia[id];
+      if (!m?.next) continue;
+      for (let n = m.next - 1; n <= m.episodes; n++) {
+        const at = m.nextAt + (n - m.next) * 7 * 24 * H;
+        if (at > variables.since && at < variables.until) schedule.push({ mediaId: id, episode: n, airingAt: at });
+      }
+    }
+    schedule.sort((a, b) => a.airingAt - b.airingAt);
+    const page = variables.page ?? 1;
+    send(200, { data: {
+      entries: { media },
+      schedule: { pageInfo: { hasNextPage: schedule.length > page * 50 }, airingSchedules: schedule.slice((page - 1) * 50, page * 50) },
+    } });
+  });
 }
 
 function tmdb(url, req, send) {
@@ -128,6 +170,7 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname.startsWith("/3/")) return tmdb(url, req, send);
   if (url.pathname.startsWith("/tvmaze/")) return tvmaze(url, res, send);
+  if (url.pathname === "/anilist") return anilist(req, send);
   if (url.pathname === "/update/latest.json") {
     return send(200, {
       version: "0.3.0", notes: "Test update", pub_date: "2026-11-05T00:00:00Z",
@@ -167,6 +210,14 @@ const server = http.createServer((req, res) => {
     return send(200, { Items: list });
   }
   if (url.pathname === "/Shows/NextUp") return send(200, { Items: nextUp() });
+  const seasons = url.pathname.match(/^\/Shows\/(\w+)\/Seasons$/);
+  if (seasons) {
+    const show = shows.find((s) => s.id === seasons[1]);
+    return send(200, { Items: show.jf.map((_, i) => ({
+      Id: hex(5000 + i), IndexNumber: i + 1, Name: `Season ${i + 1}`,
+      ProviderIds: show.anilist?.seasons?.[i + 1] ? { AniList: String(show.anilist.seasons[i + 1]) } : {},
+    })) });
+  }
   if (url.pathname === "/UserItems/Resume") return send(200, { Items: resume() });
   const eps = url.pathname.match(/^\/Shows\/(\w+)\/Episodes$/);
   if (eps) return send(200, { Items: episodes.get(eps[1]) ?? [] });

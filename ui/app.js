@@ -1,5 +1,5 @@
 import {
-  loadShows, compareWithTmdb, episodeLabel, episodeRanges, episodeKey, minutesLeft, timeAgo,
+  loadShows, compareWithTmdb, compareWithAniList, episodeLabel, episodeRanges, episodeKey, minutesLeft, timeAgo,
   dayLabel, dayString, airDay, airTime, hasAired,
 } from "./model.js";
 
@@ -179,8 +179,12 @@ function viewWatching(shows) {
     + section("Caught up", listed.filter((s) => !s.next), "caught");
 }
 
+// Without a TMDB key, only anime matched on AniList can be checked.
+const needsKey = (shows) => !state.settings?.tmdb && !shows.some((show) => state.tmdb.has(show.id));
+const keyHint = () => (state.settings?.tmdb ? "" : '<p class="footnote">Add a TMDB API key in Settings to include shows that aren\'t on AniList.</p>');
+
 function viewUpcoming(shows) {
-  if (!state.settings?.tmdb) return keyNotice();
+  if (needsKey(shows)) return keyNotice();
   const today = dayString();
   const days = new Map();
   const undated = [];
@@ -209,19 +213,20 @@ function viewUpcoming(shows) {
   </section>`).join("");
   const later = undated.length ? `<section class="day"><h2>Date not announced</h2>
     <p class="plain">${undated.map((s) => esc(s.title)).join(", ")}</p></section>` : "";
-  return groups + later + '<p class="footnote">Times are from TVmaze, in your time zone. Episodes without a time use TMDB\'s air date in the country of broadcast.</p>';
+  return groups + later + '<p class="footnote">Times are in your time zone: AniList for anime, TVmaze for other shows. Episodes without a time use TMDB\'s air date in the country of broadcast.</p>' + keyHint();
 }
 
 function viewMissing(shows) {
-  if (!state.settings?.tmdb) return keyNotice();
+  if (needsKey(shows)) return keyNotice();
   const gaps = [];
   const unchecked = [];
   const ignored = [];
   for (const show of shows) {
     const info = state.tmdb.get(show.id);
-    if (!show.tmdbId) unchecked.push([show, "Jellyfin has no TMDB ID for this show. Identify it in Jellyfin to fix this."]);
-    else if (info?.error) unchecked.push([show, info.error]);
-    else if (info?.numberingDiffers) unchecked.push([show, "Jellyfin numbers its episodes differently from TMDB."]);
+    if (!info && !show.tmdbId) unchecked.push([show, "Jellyfin has no TMDB or AniList ID for this show. Identify it in Jellyfin to fix this."]);
+    else if (!info) continue; // No TMDB key yet.
+    else if (info.error) unchecked.push([show, info.error]);
+    else if (info.numberingDiffers) unchecked.push([show, `Jellyfin numbers its episodes differently from ${info.source}.`]);
     else {
       if (info?.missing?.length) gaps.push([show, info]);
       if (info?.ignoredByHand?.length || info?.ignoredEarlier?.length) ignored.push([show, info]);
@@ -251,7 +256,7 @@ function viewMissing(shows) {
         ${info.ignoredByHand.length ? `<button data-action="restore" aria-label="Stop ignoring episodes of ${esc(show.title)}">Restore</button>` : ""}
       </article>`).join("")}</section>`
     : "";
-  return list + skipped + hidden;
+  return list + skipped + hidden + keyHint();
 }
 
 function viewSettings() {
@@ -376,16 +381,33 @@ function render() {
   root.querySelectorAll("[data-setting]").forEach((box) => box.addEventListener("change", onSetting));
 }
 
+// Air dates and missing episodes: AniList for anime it can match, TMDB for everything else.
 async function loadTmdb() {
-  if (!state.settings?.tmdb) { state.tmdb = new Map(); state.tmdbError = null; return; }
   const results = new Map();
   const raw = new Map();
   let failure = null;
   const ignoreEarlier = state.settings.ignoreEarlier;
   const shows = state.shows ?? [];
+
+  const anime = shows.filter((show) => show.anilist);
+  if (anime.length) {
+    try {
+      const data = await invoke("anilist_entries", { ids: anime.flatMap((show) => Object.values(show.anilist)) });
+      for (const show of anime) {
+        const ignored = new Set(state.ignored[show.id] ?? []);
+        const info = compareWithAniList(show, data, { ignored, ignoreEarlier });
+        if (!info) continue; // AniList doesn't know an ID: fall back to TMDB.
+        results.set(show.id, info);
+        raw.set(show.id, { episodes: info.schedule });
+      }
+    } catch (error) {
+      failure = error; // Anime falls back to TMDB below.
+    }
+  }
+
   for (let i = 0; i < shows.length; i += 4) {
     await Promise.all(shows.slice(i, i + 4).map(async (show) => {
-      if (!show.tmdbId) return;
+      if (!show.tmdbId || results.has(show.id) || !state.settings.tmdb) return;
       try {
         const ignored = new Set(state.ignored[show.id] ?? []);
         const info = await invoke("tmdb_show", { id: show.tmdbId });

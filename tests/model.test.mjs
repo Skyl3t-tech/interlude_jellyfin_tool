@@ -135,3 +135,41 @@ test("an episode with an exact time gets a day to reach the server", () => {
   assert.deepEqual(result.missing.map((e) => e.number), [3]);
   assert.deepEqual(result.upcoming.map((e) => e.number), [2]);
 });
+
+import { compareWithAniList, anilistSeasons, anilistId } from "../ui/model.js";
+
+test("AniList IDs are found on seasons, or on a single-season show", () => {
+  assert.equal(anilistId({ Tmdb: "1", AniList: "154587" }), 154587);
+  assert.equal(anilistId({ Anilist: "7" }), 7);
+  const seasons = [{ IndexNumber: 0 }, { IndexNumber: 1, ProviderIds: { AniList: "10" } }, { IndexNumber: 2, ProviderIds: { AniList: "20" } }];
+  assert.deepEqual(anilistSeasons({ AniList: "10" }, seasons), { 1: 10, 2: 20 });
+  assert.deepEqual(anilistSeasons({ AniList: "10" }, [{ IndexNumber: 1 }]), { 1: 10 });
+  assert.equal(anilistSeasons({ AniList: "10" }, [{ IndexNumber: 1 }, { IndexNumber: 2 }]), null);
+});
+
+test("AniList finds missing anime episodes and gives just-aired ones a day", () => {
+  const now = Date.parse("2026-11-05T12:00:00Z");
+  const hour = 3_600_000;
+  const show = { ...jf([[1, 1], [1, 2], [1, 3], [1, 4], [1, 5], [1, 6], [2, 1], [2, 2], [2, 3]]), anilist: { 1: 10, 2: 20 } };
+  const data = {
+    media: [
+      { id: 10, status: "FINISHED", episodes: 6 },
+      { id: 20, status: "RELEASING", episodes: 12, nextAiringEpisode: { episode: 7, airingAt: (now + 48 * hour) / 1000 } },
+    ],
+    schedule: [
+      { mediaId: 20, episode: 5, airingAt: (now - 40 * hour) / 1000 },
+      { mediaId: 20, episode: 6, airingAt: (now - 2 * hour) / 1000 },
+    ],
+  };
+  const result = compareWithAniList(show, data, { now });
+  assert.deepEqual(result.missing.map((e) => `${e.season}:${e.number}`), ["2:4", "2:5"]);
+  assert.deepEqual(result.upcoming.map((e) => `${e.season}:${e.number}`), ["2:6", "2:7"]);
+  assert.equal(result.airing, true);
+});
+
+test("AniList comparison is withheld when Jellyfin has episodes AniList doesn't", () => {
+  const show = { ...jf([[1, 1], [1, 30]]), anilist: { 1: 10 } };
+  const result = compareWithAniList(show, { media: [{ id: 10, status: "FINISHED", episodes: 12 }], schedule: [] });
+  assert.equal(result.numberingDiffers, true);
+  assert.deepEqual(result.missing, []);
+});

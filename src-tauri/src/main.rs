@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod anilist;
 mod ignored;
 mod jellyfin;
 mod live;
@@ -14,6 +15,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_notification::NotificationExt;
+use anilist::AniList;
 use ignored::Ignored;
 use live::Live;
 use std::collections::HashMap;
@@ -93,6 +95,11 @@ fn notify(title: String, body: String, app: AppHandle) -> Result<(), Failure> {
         .body(body)
         .show()
         .map_err(|e| Failure::server(format!("Couldn't show a notification: {e}")))
+}
+
+#[tauri::command]
+async fn anilist_entries(ids: Vec<u64>, anilist: State<'_, AniList>) -> Result<Value, Failure> {
+    anilist.entries(ids).await
 }
 
 #[tauri::command]
@@ -260,6 +267,7 @@ fn main() {
             app.manage(Tmdb::load(dir.clone()));
             app.manage(Ignored::load(dir));
             app.manage(Live::new());
+            app.manage(AniList::new());
             start_live(app.handle());
 
             let open = MenuItem::with_id(app, "open", "Open Interlude", true, None::<&str>)?;
@@ -338,6 +346,7 @@ fn main() {
             tmdb_show,
             open_tmdb_key_page,
             notify,
+            anilist_entries,
             get_ignored,
             set_ignored,
             live_connected,
