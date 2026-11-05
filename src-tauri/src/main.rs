@@ -103,6 +103,23 @@ async fn anilist_entries(ids: Vec<u64>, anilist: State<'_, AniList>) -> Result<V
 }
 
 #[tauri::command]
+async fn anilist_details(id: u64, anilist: State<'_, AniList>) -> Result<Value, Failure> {
+    anilist.details(id).await
+}
+
+/// Opens a show's page on IMDb, TMDB, AniList and so on, from the info card.
+#[tauri::command]
+fn open_link(url: String, app: AppHandle) -> Result<(), Failure> {
+    let parsed: reqwest::Url = url.parse().map_err(|_| Failure::server("That link isn't valid."))?;
+    if parsed.scheme() != "https" {
+        return Err(Failure::server("Only https links can be opened."));
+    }
+    app.opener()
+        .open_url(parsed.as_str(), None::<&str>)
+        .map_err(|e| Failure::server(format!("Can't open your browser: {e}")))
+}
+
+#[tauri::command]
 fn get_ignored(ignored: State<'_, Ignored>) -> HashMap<String, Vec<String>> {
     ignored.all()
 }
@@ -347,6 +364,8 @@ fn main() {
             open_tmdb_key_page,
             notify,
             anilist_entries,
+            anilist_details,
+            open_link,
             get_ignored,
             set_ignored,
             live_connected,

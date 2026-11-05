@@ -32,11 +32,30 @@ const QUERY: &str = r#"query ($ids: [Int], $since: Int, $until: Int, $page: Int)
   }
 }"#;
 
+const DETAILS_QUERY: &str = r#"query ($id: Int) {
+  Media(id: $id, type: ANIME) {
+    id siteUrl format season seasonYear episodes duration status averageScore genres
+    title { romaji english native }
+    description(asHtml: false)
+    studios(isMain: true) { nodes { name } }
+    characters(sort: [ROLE, RELEVANCE, ID], perPage: 16) {
+      edges {
+        role
+        node { name { full } image { medium } }
+        japanese: voiceActors(language: JAPANESE, sort: [RELEVANCE, ID]) { name { full } image { medium } }
+        english: voiceActors(language: ENGLISH, sort: [RELEVANCE, ID]) { name { full } image { medium } }
+      }
+    }
+  }
+}"#;
+const DETAILS_CACHE_FOR: Duration = Duration::from_secs(24 * 60 * 60);
+
 pub struct AniList {
     client: Client,
     url: String,
     last: tokio::sync::Mutex<Option<Instant>>,
     cache: Mutex<HashMap<Vec<u64>, (Instant, Value)>>,
+    details: Mutex<HashMap<u64, (Instant, Value)>>,
 }
 
 impl AniList {
@@ -51,10 +70,15 @@ impl AniList {
             url,
             last: tokio::sync::Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
+            details: Mutex::new(HashMap::new()),
         }
     }
 
     async fn post(&self, variables: Value) -> Result<Value, Failure> {
+        self.send(QUERY, variables).await
+    }
+
+    async fn send(&self, query: &str, variables: Value) -> Result<Value, Failure> {
         let mut last = self.last.lock().await;
         if let Some(at) = *last {
             let wait = SPACING.saturating_sub(at.elapsed());
@@ -65,7 +89,7 @@ impl AniList {
         let response = self
             .client
             .post(&self.url)
-            .json(&json!({ "query": QUERY, "variables": variables }))
+            .json(&json!({ "query": query, "variables": variables }))
             .send()
             .await;
         *last = Some(Instant::now());
@@ -123,5 +147,21 @@ impl AniList {
         let value = json!({ "media": media, "schedule": schedule });
         self.cache.lock().unwrap().insert(ids, (Instant::now(), value.clone()));
         Ok(value)
+    }
+
+    /// Description, studio, score and characters with their voice actors, for the info card.
+    pub async fn details(&self, id: u64) -> Result<Value, Failure> {
+        if let Some((at, value)) = self.details.lock().unwrap().get(&id) {
+            if at.elapsed() < DETAILS_CACHE_FOR {
+                return Ok(value.clone());
+            }
+        }
+        let data = self.send(DETAILS_QUERY, json!({ "id": id })).await?;
+        let media = data["Media"].clone();
+        if media.is_null() {
+            return Err(Failure::server("AniList has no anime with this ID."));
+        }
+        self.details.lock().unwrap().insert(id, (Instant::now(), media.clone()));
+        Ok(media)
     }
 }

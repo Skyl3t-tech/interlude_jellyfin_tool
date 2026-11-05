@@ -1,7 +1,9 @@
 import {
   loadShows, compareWithTmdb, compareWithAniList, episodeLabel, episodeRanges, episodeKey, minutesLeft, timeAgo,
   dayLabel, dayString, airDay, airTime, hasAired,
+  anilistId,
 } from "./model.js";
+import { recommend } from "./recommend.js";
 
 const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -10,7 +12,8 @@ const POLL_MS = 60_000; // Without a live connection.
 const LIVE_POLL_MS = 15 * 60_000; // A safety net while live.
 const LIVE_GAP_MS = 5_000; // Playback sends many changes; refresh at most this often.
 const UPDATE_CHECK_MS = 6 * 3_600_000;
-const TABS = [["watching", "Watching"], ["upcoming", "Upcoming"], ["missing", "Missing"]];
+const TABS = [["watching", "Watching"], ["upcoming", "Upcoming"], ["missing", "Missing"], ["recommended", "Recommended"]];
+const LIBRARY_MS = 30 * 60_000;
 
 const root = document.getElementById("app");
 const toastEl = document.getElementById("toast");
@@ -31,6 +34,10 @@ const state = {
   justPlayed: null,
   keyMessage: "",
   live: false,
+  library: null, // every series on the server, for recommendations
+  libraryAt: 0,
+  details: new Map(), // info card data by item ID
+  panelTab: "episodes",
   ignored: {},
   update: null, // { version } when one is ready
   updateMessage: "",
@@ -127,24 +134,11 @@ function section(title, shows, extraClass = "") {
   return `<section class="${extraClass}"><h2>${title}</h2>${shows.map(row).join("")}</section>`;
 }
 
-function detail(show) {
+function episodesPanel(show) {
   const seasons = [...new Set(show.episodes.map((ep) => ep.season))].sort((a, b) => a - b);
   const season = seasons.includes(state.season) ? state.season : (show.next?.season ?? seasons.at(-1));
   const eps = show.episodes.filter((ep) => ep.season === season);
-  const info = state.tmdb.get(show.id);
-  const summary = show.remaining
-    ? `${plural(show.remaining, "episode", "episodes")} left`
-    : "All episodes watched";
-  const missing = info?.missing?.length ? `, ${plural(info.missing.length, "aired episode isn't", "aired episodes aren't")} in Jellyfin` : "";
-  return `<aside class="detail" aria-label="${esc(show.title)}">
-    <header>
-      <img class="backdrop" src="${image(show.id, "Backdrop", "maxWidth=900")}" alt="" />
-      <button class="close" data-action="close" aria-label="Close episodes">×</button>
-      <h2>${esc(show.title)}</h2>
-      <p>${summary}${missing}</p>
-      ${strip(show, { large: true })}
-    </header>
-    <div class="seasons" role="tablist" aria-label="Seasons">
+  return `<div class="seasons" role="tablist" aria-label="Seasons">
       ${seasons.map((s) => `<button role="tab" aria-selected="${s === season}" data-action="season" data-season="${s}">${s === 0 ? "Specials" : `Season ${s}`}</button>`).join("")}
     </div>
     <ol class="episodes">
@@ -155,8 +149,151 @@ function detail(show) {
         <span class="name">${esc(ep.name)}${show.fresh.includes(ep) ? ' <span class="badge">New</span>' : ""}</span>
         <button class="link" data-action="jellyfin" data-item="${esc(ep.id)}" aria-label="Open ${esc(ep.name)} in Jellyfin">Open</button>
       </li>`).join("")}
-    </ol>
+    </ol>`;
+}
+
+const stripTags = (text) => String(text ?? "").replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "").replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/&#039;/g, "'");
+const paragraphs = (text) => esc(stripTags(text)).split(/\n{2,}|\n/).filter((p) => p.trim()).map((p) => `<p>${p}</p>`).join("");
+const initials = (name) => esc(String(name ?? "?").split(/\s+/).map((w) => w[0]).slice(0, 2).join(""));
+const face = (src, name) => src ? `<img class="face" src="${esc(src)}" alt="" loading="lazy" />` : `<span class="face">${initials(name)}</span>`;
+const SEASON = { WINTER: "Winter", SPRING: "Spring", SUMMER: "Summer", FALL: "Fall" };
+
+/** The AniList entry to describe: the season you're on, else the first matched season, else the show's ID. */
+function anilistFor(id) {
+  const show = (state.shows ?? []).find((s) => s.id === id);
+  if (show?.anilist) return show.anilist[show.next?.season] ?? Object.values(show.anilist)[0];
+  return anilistId((state.library ?? []).find((i) => i.Id === id)?.ProviderIds);
+}
+
+async function loadDetails(id) {
+  if (state.details.has(id)) return;
+  const userId = state.session.userId;
+  state.details.set(id, { loading: true });
+  const quiet = (promise) => promise.catch((error) => ({ error: error.message }));
+  const aniId = anilistFor(id);
+  const [item, similar, anime] = await Promise.all([
+    quiet(get(`/Items/${id}`, [["userId", userId]])),
+    quiet(get(`/Items/${id}/Similar`, [["userId", userId], ["limit", "12"], ["fields", "Genres,ProductionYear"], ["enableImages", "false"]])),
+    aniId ? quiet(invoke("anilist_details", { id: aniId })) : Promise.resolve(null),
+  ]);
+  state.details.set(id, { item, similar, anime });
+  if (state.openId === id) render();
+}
+
+function statusOf(id) {
+  const show = (state.shows ?? []).find((s) => s.id === id);
+  if (show) return show.caughtUp ? "Caught up" : "Watching";
+  const item = (state.library ?? []).find((i) => i.Id === id);
+  return item?.UserData?.Played ? "Watched" : "Not started";
+}
+
+function aboutPanel(id) {
+  const data = state.details.get(id);
+  if (!data || data.loading) return '<p class="muted pad">Loading show details</p>';
+  const { item, similar, anime } = data;
+  if (item?.error) return `<p class="muted pad">${esc(item.error)}</p>`;
+  const ani = anime && !anime.error ? anime : null;
+
+  const facts = [
+    ["Year", item.ProductionYear],
+    ["Status", item.Status === "Continuing" ? "Airing" : item.Status],
+    ["Genres", (item.Genres ?? []).join(", ")],
+    ["Studio", (item.Studios ?? []).map((s) => s.Name).join(", ") || ani?.studios?.nodes?.map((s) => s.name).join(", ")],
+    ["Rated", item.OfficialRating],
+    ["Score", item.CommunityRating ? `${item.CommunityRating.toFixed(1)} / 10` : ani?.averageScore ? `${(ani.averageScore / 10).toFixed(1)} / 10 on AniList` : ""],
+    ["Format", ani ? [ani.format?.replace("_", " "), ani.season ? `${SEASON[ani.season]} ${ani.seasonYear}` : ""].filter(Boolean).join(", ") : ""],
+    ["Japanese title", ani?.title?.native],
+  ].filter(([, value]) => value);
+
+  const links = [...(item.ExternalUrls ?? []).filter((l) => /^https:/.test(l.Url)), ...(ani?.siteUrl && !(item.ExternalUrls ?? []).some((l) => /anilist/i.test(l.Url)) ? [{ Name: "AniList", Url: ani.siteUrl }] : [])];
+
+  const characters = ani?.characters?.edges ?? [];
+  const people = (item.People ?? []).filter((p) => p.Type === "Actor").slice(0, 16);
+  const crew = (item.People ?? []).filter((p) => ["Director", "Writer", "Creator"].includes(p.Type)).slice(0, 4);
+  const cast = characters.length
+    ? `<section><h3>Characters and voice actors</h3><ul class="cast">${characters.map((edge) => {
+        const ja = edge.japanese?.[0];
+        const en = edge.english?.[0];
+        return `<li>${face(edge.node?.image?.medium, edge.node?.name?.full)}
+          <div><strong>${esc(edge.node?.name?.full)}</strong>
+          <span>${esc([ja?.name?.full, en ? `${en.name.full} (English)` : ""].filter(Boolean).join(", ") || (edge.role === "MAIN" ? "Main character" : "Supporting character"))}</span></div></li>`;
+      }).join("")}</ul><p class="muted small">Characters from AniList.</p></section>`
+    : people.length
+      ? `<section><h3>Cast</h3><ul class="cast">${people.map((p) => `<li>${face(p.PrimaryImageTag ? image(p.Id, "Primary", "maxHeight=120") : "", p.Name)}
+          <div><strong>${esc(p.Name)}</strong><span>${esc(p.Role)}</span></div></li>`).join("")}</ul></section>`
+      : "";
+
+  const alike = (similar?.Items ?? []).filter((i) => i.Type === "Series");
+  const more = alike.length
+    ? `<section><h3>More like this on your server</h3><ul class="alike">${alike.map((i) => `<li data-show="${esc(i.Id)}">
+        <button class="poster" data-action="open" aria-label="About ${esc(i.Name)}"><img src="${image(i.Id, "Primary", "maxHeight=180")}" alt="" loading="lazy" /></button>
+        <div><button class="title" data-action="open">${esc(i.Name)}</button>
+        <span>${esc([i.ProductionYear, statusOf(i.Id)].filter(Boolean).join(", "))}</span></div></li>`).join("")}</ul></section>`
+    : "";
+
+  return `<div class="about">
+    ${item.Taglines?.[0] ? `<p class="tagline">${esc(item.Taglines[0])}</p>` : ""}
+    <div class="overview">${paragraphs(item.Overview || ani?.description || "No description.")}</div>
+    ${facts.length ? `<dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` : ""}
+    ${crew.length ? `<p class="muted">${crew.map((p) => `${esc(p.Type)}: ${esc(p.Name)}`).join("<br>")}</p>` : ""}
+    <div class="links">
+      <button data-action="jellyfin" data-item="${esc(id)}">Open in Jellyfin</button>
+      ${links.map((l) => `<button class="link-button" data-action="link" data-url="${esc(l.Url)}">${esc(l.Name)}</button>`).join("")}
+    </div>
+    ${cast}
+    ${more}
+  </div>`;
+}
+
+/** The side panel: Episodes (shows you watch) and About (any show on the server). */
+function detail(id) {
+  const show = (state.shows ?? []).find((s) => s.id === id);
+  const item = (state.library ?? []).find((i) => i.Id === id) ?? state.details.get(id)?.item;
+  const title = show?.title ?? item?.Name ?? "";
+  const tab = show ? state.panelTab : "about";
+  return `<aside class="detail" aria-label="${esc(title)}">
+    <header>
+      <img class="backdrop" src="${image(id, "Backdrop", "maxWidth=900")}" alt="" />
+      <button class="close" data-action="close" aria-label="Close panel">×</button>
+      <h2>${esc(title)}</h2>
+      ${show ? `<p>${show.remaining ? `${plural(show.remaining, "episode", "episodes")} left` : "All episodes watched"}${
+          state.tmdb.get(id)?.missing?.length ? `, ${plural(state.tmdb.get(id).missing.length, "aired episode isn't", "aired episodes aren't")} in Jellyfin` : ""}</p>${strip(show, { large: true })}`
+        : `<p>${esc(statusOf(id))}</p>`}
+    </header>
+    ${show ? `<div class="panel-tabs" role="tablist">
+      <button role="tab" aria-selected="${tab === "episodes"}" data-action="panel" data-tab="episodes">Episodes</button>
+      <button role="tab" aria-selected="${tab === "about"}" data-action="panel" data-tab="about">About</button>
+    </div>` : ""}
+    ${tab === "episodes" ? episodesPanel(show) : aboutPanel(id)}
   </aside>`;
+}
+
+function tile(candidate) {
+  const { item } = candidate;
+  return `<li class="tile${item.Id === state.openId ? " open" : ""}" data-show="${esc(item.Id)}">
+    <button class="cover" data-action="open" aria-label="About ${esc(item.Name)}">
+      <img src="${image(item.Id, "Primary", "maxHeight=360")}" alt="" loading="lazy" />
+    </button>
+    <button class="title" data-action="open">${esc(item.Name)}</button>
+    <span>${esc([item.ProductionYear, (item.Genres ?? []).slice(0, 2).join(", ")].filter(Boolean).join(", "))}</span>
+    ${candidate.reason ? `<span class="why">${esc(candidate.reason)}</span>` : ""}
+  </li>`;
+}
+
+function viewRecommended() {
+  if (state.library === null) return notice("", "Loading your library");
+  const result = recommend(state.library, state.shows ?? []);
+  if (!result.hasTaste) return notice("Nothing to go on yet", "Watch a few episodes in Jellyfin and recommendations from your library appear here.");
+  if (!result.picks.length) return notice("You've started everything", "Every show on your server that matches what you watch is already in progress or watched.");
+  const needle = state.filter.trim().toLowerCase();
+  const keep = (c) => c.item.Name.toLowerCase().includes(needle);
+  const picks = result.picks.filter(keep);
+  return `${picks.length ? `<section><h2>Picked for you</h2><ul class="tiles">${picks.map(tile).join("")}</ul></section>` : ""}
+    ${result.genres.map(({ genre, items }) => {
+      const shown = items.filter(keep);
+      return shown.length ? `<section><h2>${esc(genre)}</h2><ul class="tiles">${shown.map(tile).join("")}</ul></section>` : "";
+    }).join("")}
+    <p class="footnote">Shows on your server you haven't started, ranked by how well their genres match what you watch.</p>`;
 }
 
 const notice = (title, text = "", action = "") =>
@@ -303,7 +440,7 @@ function viewSettings() {
 function viewMain() {
   const needle = state.filter.trim().toLowerCase();
   const shows = (state.shows ?? []).filter((s) => s.title.toLowerCase().includes(needle));
-  const open = (state.shows ?? []).find((s) => s.id === state.openId);
+  const open = state.openId;
   const missingCount = (state.shows ?? []).filter((s) => state.tmdb.get(s.id)?.missing?.length).length;
 
   let content;
@@ -314,6 +451,7 @@ function viewMain() {
   else if (!shows.length && state.shows.length) content = notice("", `No show matches "${esc(state.filter)}".`);
   else if (state.tab === "upcoming") content = viewUpcoming(shows);
   else if (state.tab === "missing") content = viewMissing(shows);
+  else if (state.tab === "recommended") content = viewRecommended();
   else content = viewWatching(shows);
 
   const problem = state.error && state.shows ? state.error : state.tmdbError;
@@ -476,6 +614,7 @@ async function refresh() {
     state.error = null;
     state.updatedAt = Date.now();
     render();
+    if (Date.now() - state.libraryAt > LIBRARY_MS) await loadLibrary();
     await loadTmdb();
     notifyAdded();
     notifyAiring();
@@ -511,9 +650,25 @@ async function checkUpdate({ quiet = true } = {}) {
   render();
 }
 
+async function loadLibrary() {
+  const result = await get("/Items", [
+    ["userId", state.session.userId],
+    ["includeItemTypes", "Series"],
+    ["recursive", "true"],
+    ["fields", "Genres,ProviderIds,ProductionYear,CommunityRating"],
+    ["enableUserData", "true"],
+    ["enableImages", "false"],
+  ]);
+  state.library = result.Items ?? [];
+  state.libraryAt = Date.now();
+}
+
 async function endSession(message) {
   state.session = null;
   state.shows = null;
+  state.library = null;
+  state.libraryAt = 0;
+  state.details.clear();
   state.openId = null;
   state.error = null;
   state.tab = "watching";
@@ -618,10 +773,19 @@ const actions = {
   open(el) {
     state.openId = el.closest("[data-show]").dataset.show;
     state.season = null;
+    const tracked = (state.shows ?? []).some((s) => s.id === state.openId);
+    state.panelTab = tracked && state.tab !== "recommended" && !el.closest(".alike") ? "episodes" : "about";
+    if (state.panelTab === "about" || !tracked) loadDetails(state.openId);
     render();
     root.querySelector(".close")?.focus();
   },
   close() { state.openId = null; render(); },
+  panel(el) {
+    state.panelTab = el.dataset.tab;
+    if (state.panelTab === "about") loadDetails(state.openId);
+    render();
+  },
+  link(el) { invoke("open_link", { url: el.dataset.url }).catch((e) => toast(e.message)); },
   season(el) { state.season = Number(el.dataset.season); render(); },
   tab(el) { state.tab = el.dataset.tab; state.openId = null; root.querySelector(".scroll").scrollTop = 0; render(); },
   played(el) { el.disabled = true; setPlayed(el.dataset.episode, true); },
@@ -708,7 +872,10 @@ async function start() {
   refresh();
 }
 
-listen("jellyfin-changed", refreshSoon);
+listen("jellyfin-changed", (event) => {
+  if (event.payload === "LibraryChanged") { state.libraryAt = 0; state.details.clear(); }
+  refreshSoon();
+});
 listen("live-status", (event) => { state.live = event.payload; render(); });
 
 // Each minute: poll if there's no live connection (or as a rare safety net), and check air times.

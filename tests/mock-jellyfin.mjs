@@ -76,8 +76,28 @@ const nextUp = () => [...episodes.values()].flatMap((list) => {
   return first > 0 && !list[first].UserData.PlaybackPositionTicks ? [list[first]] : [];
 });
 const resume = () => [...episodes.values()].flat().filter((e) => e.UserData.PlaybackPositionTicks > 0);
+const GENRES = {
+  [hex(1)]: ["Fantasy", "Adventure", "Drama"], [hex(2)]: ["Drama", "Mystery", "Science Fiction"],
+  [hex(3)]: ["Action", "Adventure", "Comedy"], [hex(4)]: ["Drama", "Crime", "Thriller"],
+  [hex(5)]: ["Fantasy", "Mystery"], [hex(6)]: ["Action", "Comedy", "Supernatural"],
+  [hex(7)]: ["Science Fiction", "Drama"], [hex(8)]: ["Mystery", "Drama", "Romance"],
+};
+// Shows on the server nobody has started: the pool for recommendations.
+const unstartedShows = [
+  ["Delicious in Dungeon", ["Fantasy", "Adventure", "Comedy"], 8.6, 2024],
+  ["Mushoku Tensei", ["Fantasy", "Drama", "Adventure"], 8.1, 2021],
+  ["Chainsaw Man", ["Action", "Supernatural"], 8.3, 2022],
+  ["Pachinko", ["Drama"], 8.2, 2022],
+  ["Dark", ["Mystery", "Science Fiction", "Thriller"], 8.7, 2017],
+  ["Spy x Family", ["Action", "Comedy"], 8.4, 2022],
+  ["Bridgerton", ["Romance", "Drama"], 7.3, 2020],
+  ["Bluey", ["Animation", "Kids"], 9.3, 2018],
+].map(([Name, Genres, CommunityRating, ProductionYear], i) => ({
+  Id: hex(900 + i), Name, Type: "Series", Status: "Ended", Genres, CommunityRating, ProductionYear,
+  ProviderIds: {}, UserData: { Played: false, PlayedPercentage: 0 },
+}));
 const seriesItem = (show) => ({
-  Id: show.id, Name: show.name, Type: "Series", Status: show.status,
+  Id: show.id, Name: show.name, Type: "Series", Status: show.status, Genres: GENRES[show.id] ?? [], ProductionYear: 2023, CommunityRating: 8,
   ProviderIds: { ...(show.tmdbId ? { Tmdb: String(show.tmdbId) } : {}), ...(show.anilist ? { AniList: String(show.anilist.series) } : {}) },
   UserData: { Played: episodes.get(show.id).every((e) => e.UserData.Played) },
 });
@@ -115,6 +135,21 @@ function anilist(req, send) {
   req.on("data", (c) => (body += c));
   req.on("end", () => {
     const { query, variables } = JSON.parse(body);
+    if (query.includes("characters")) {
+      const person = (name, file) => ({ name: { full: name }, image: { medium: null } });
+      return send(200, { data: { Media: {
+        id: variables.id, siteUrl: `https://anilist.co/anime/${variables.id}`, format: "TV", season: "FALL", seasonYear: 2023,
+        episodes: 28, status: "FINISHED", averageScore: 91, genres: ["Adventure", "Drama", "Fantasy"],
+        title: { romaji: "Sousou no Frieren", english: "Frieren: Beyond Journey's End", native: "葬送のフリーレン" },
+        description: "After the party of heroes defeated the Demon King...<br><br>(Source: Crunchyroll)",
+        studios: { nodes: [{ name: "Madhouse" }] },
+        characters: { edges: [
+          { role: "MAIN", node: person("Frieren"), japanese: [person("Atsumi Tanezaki")], english: [person("Mallorie Rodak")] },
+          { role: "MAIN", node: person("Fern"), japanese: [person("Kana Ichinose")], english: [] },
+          { role: "SUPPORTING", node: person("Himmel"), japanese: [], english: [] },
+        ] },
+      } } });
+    }
     if (!query.includes("airingSchedules")) return send(400, { errors: [{ message: "bad query" }] });
     const ids = variables.ids;
     const media = ids.filter((id) => anilistMedia[id]).map((id) => {
@@ -202,9 +237,31 @@ const server = http.createServer((req, res) => {
 
   const image = url.pathname.match(/^\/Items\/(\w+)\/Images\/\w+$/);
   if (image) { res.writeHead(200, { "content-type": "image/svg+xml" }); return res.end(svg(image[1])); }
+  const details = url.pathname.match(/^\/Items\/(\w+)$/);
+  if (details) {
+    const item = [...shows.map(seriesItem), ...unstartedShows].find((i) => i.Id === details[1]);
+    if (!item) return send(404);
+    return send(200, {
+      ...item, Overview: `${item.Name} is a show used to test Interlude's info card.\n\nIt has a second paragraph.`,
+      Taglines: ["A tagline from Jellyfin"], OfficialRating: "TV-14",
+      Studios: [{ Name: "Test Studio" }],
+      ExternalUrls: [{ Name: "IMDb", Url: "https://www.imdb.com/title/tt0000001" }, { Name: "TheMovieDb", Url: "https://www.themoviedb.org/tv/1" }],
+      People: [
+        { Name: "Ada Actor", Id: hex(7001), Role: "Lead", Type: "Actor", PrimaryImageTag: "x" },
+        { Name: "Ben Supporting", Id: hex(7002), Role: "Friend", Type: "Actor" },
+        { Name: "Cleo Director", Id: hex(7003), Type: "Director" },
+      ],
+    });
+  }
+  const similar = url.pathname.match(/^\/Items\/(\w+)\/Similar$/);
+  if (similar) {
+    const base = GENRES[similar[1]] ?? unstartedShows.find((i) => i.Id === similar[1])?.Genres ?? [];
+    const pool = [...shows.map(seriesItem), ...unstartedShows].filter((i) => i.Id !== similar[1]);
+    return send(200, { Items: pool.filter((i) => i.Genres.some((g) => base.includes(g))).slice(0, 6) });
+  }
   if (url.pathname === "/Items") {
     const ids = url.searchParams.get("ids");
-    let list = shows.map(seriesItem);
+    let list = [...shows.map(seriesItem), ...(ids || url.searchParams.get("filters") ? [] : unstartedShows)];
     if (ids) list = list.filter((s) => ids.split(",").includes(s.Id));
     if (url.searchParams.get("filters") === "IsPlayed") list = list.filter((s) => s.UserData.Played);
     return send(200, { Items: list });

@@ -152,6 +152,15 @@ fn normalize_server(url: &str) -> Result<String, Failure> {
     }
 }
 
+/// `/Items/{id}` (details) and `/Items/{id}/Similar`.
+fn is_item_route(path: &str) -> bool {
+    let mut parts = path.trim_start_matches("/Items/").split('/');
+    path.starts_with("/Items/")
+        && parts.next().is_some_and(is_item_id)
+        && matches!(parts.next(), None | Some("Similar"))
+        && parts.next().is_none()
+}
+
 fn is_item_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
@@ -353,7 +362,9 @@ impl Jellyfin {
 
     /// Read-only access for the page, limited to the routes it uses.
     pub async fn get(&self, path: &str, query: &[(String, String)]) -> Result<Value, Failure> {
-        let allowed = path == "/Items" || READABLE_PATHS.iter().any(|p| path.starts_with(p));
+        let allowed = path == "/Items"
+            || READABLE_PATHS.iter().any(|p| path.starts_with(p))
+            || is_item_route(path);
         if !allowed || path.contains("..") {
             return Err(Failure::server(format!("Blocked request to {path}.")));
         }
@@ -447,5 +458,21 @@ impl Jellyfin {
             .await
             .map_err(|_| Failure::network("Image download failed."))?;
         Ok((content_type, bytes.to_vec()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_item_route;
+
+    #[test]
+    fn item_routes() {
+        let id = "0123456789abcdef0123456789abcdef";
+        assert!(is_item_route(&format!("/Items/{id}")));
+        assert!(is_item_route(&format!("/Items/{id}/Similar")));
+        assert!(!is_item_route(&format!("/Items/{id}/Download")));
+        assert!(!is_item_route(&format!("/Items/{id}/Similar/x")));
+        assert!(!is_item_route("/Items/../System"));
+        assert!(!is_item_route("/Library/Items"));
     }
 }

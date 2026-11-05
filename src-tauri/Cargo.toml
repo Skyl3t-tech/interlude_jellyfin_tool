@@ -1,6 +1,6 @@
 [package]
 name = "interlude"
-version = "0.3.0"
+version = "0.4.0"
 description = "Tracks the shows you are watching on Jellyfin"
 edition = "2021"
 rust-version = "1.90"

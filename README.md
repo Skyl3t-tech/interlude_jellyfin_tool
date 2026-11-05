@@ -23,6 +23,9 @@ Updates are checked against the public key in `tauri.conf.json`, so only release
 - Upcoming: the next episodes, with exact times in your time zone: AniList for anime, TVmaze for other shows, otherwise TMDB's air date.
 - Missing: aired episodes that aren't in Jellyfin. An episode with an exact time gets a day to reach your server before it counts. Shows that Jellyfin numbers differently from TMDB (common with anime) are listed under Couldn't check. Episodes from before the first one on your server are ignored automatically (a setting), and Ignore hides the rest of a show's current gaps.
 
+- Recommended: shows on your server you haven't started, ranked by how well their genres match what you watch (weighted by episodes watched), grouped by your strongest genres.
+- Show panel: Episodes for shows you watch, and About for any show: description, details, links, cast from Jellyfin (or characters and voice actors from AniList for anime), and "More like this on your server" from Jellyfin's similar items.
+
 ## Data
 
 Watch progress comes only from Jellyfin, which pushes changes over its WebSocket as they happen. Air dates and episode lists come from TMDB, and air times from TVmaze, cached for 6 hours.
@@ -31,4 +34,4 @@ Anime with an AniList ID in Jellyfin (set by the AniList metadata plugin, on the
 
 ## Test
 
-`node --test tests/` checks the progress, TMDB and ignore logic. `cargo test` in `src-tauri` checks date matching. `node tests/mock-jellyfin.mjs` runs a fake Jellyfin (with live updates), TMDB, TVmaze and update feed on port 8096; see the top of that file for the variables a debug build reads.
+`node --test tests/*.test.mjs` checks the progress, TMDB and ignore logic. `cargo test` in `src-tauri` checks date matching. `node tests/mock-jellyfin.mjs` runs a fake Jellyfin (with live updates), TMDB, TVmaze and update feed on port 8096; see the top of that file for the variables a debug build reads.
